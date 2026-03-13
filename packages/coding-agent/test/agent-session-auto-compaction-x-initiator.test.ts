@@ -1,50 +1,76 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
-import { getBundledModel, type Model } from "@oh-my-pi/pi-ai";
-import { ModelRegistry } from "../src/config/model-registry";
-import { Settings } from "../src/config/settings";
-import { AgentSession } from "../src/session/agent-session";
-import { AuthStorage } from "../src/session/auth-storage";
-import { SessionManager } from "../src/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-describe("AgentSession auto-compaction Copilot initiator override", () => {
-	let tempDir: TempDir;
-	let session: AgentSession;
-	let modelRegistry: ModelRegistry;
+const compactMock = vi.fn();
 
-	beforeEach(async () => {
+mock.module("../src/session/compaction", () => ({
+	calculateContextTokens: (usage: { totalTokens?: number; input: number; output: number; cacheRead: number; cacheWrite: number }) =>
+		usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+	calculatePromptTokens: () => 0,
+	collectEntriesForBranchSummary: () => [],
+	compact: compactMock,
+	estimateTokens: () => 0,
+	generateBranchSummary: async () => "Branch summary",
+	prepareCompaction: (entries: Array<{ id?: string }>) => ({
+		firstKeptEntryId: entries[entries.length - 1]?.id ?? "missing-entry",
+		messagesToSummarize: [],
+		turnPrefixMessages: [],
+		recentMessages: [],
+		isSplitTurn: false,
+		tokensBefore: 321,
+		previousSummary: undefined,
+		previousPreserveData: undefined,
+		fileOps: { read: new Set<string>(), edited: new Set<string>() },
+		settings: {
+			enabled: true,
+			strategy: "context-full",
+			thresholdPercent: 80,
+			reserveTokens: 16384,
+			keepRecentTokens: 20000,
+			autoContinue: false,
+			remoteEnabled: false,
+		},
+	}),
+	shouldCompact: () => true,
+}));
+
+describe("AgentSession compaction Copilot initiator attribution", async () => {
+	const { getBundledModel } = await import("@oh-my-pi/pi-ai");
+	const { Settings } = await import("../src/config/settings");
+	const { createAgentSession } = await import("../src/sdk");
+	const { AuthStorage } = await import("../src/session/auth-storage");
+	const { SessionManager } = await import("../src/session/session-manager");
+
+	let tempDir: TempDir;
+	const sessions: Array<{ dispose: () => Promise<void> }> = [];
+
+	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-auto-compaction-x-initiator-");
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		authStorage.setRuntimeApiKey("github-copilot", "test-key");
-		modelRegistry = new ModelRegistry(authStorage);
+		compactMock.mockReset();
+		compactMock.mockImplementation((preparation: { firstKeptEntryId: string }) => ({
+			summary: "Compacted summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 321,
+		}));
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
-		if (session) {
+		for (const session of sessions.splice(0)) {
 			await session.dispose();
 		}
+		vi.restoreAllMocks();
 		tempDir.removeSync();
 	});
 
-	async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
-		const deadline = Date.now() + timeoutMs;
-		while (Date.now() < deadline) {
-			if (predicate()) return;
-			await Bun.sleep(10);
-		}
-		throw new Error("Timed out waiting for auto-compaction");
-	}
-
-	it("reapplies the session Copilot initiator override to auto-compaction candidates", async () => {
+	async function createSession(taskDepth: number) {
 		const model = getBundledModel("github-copilot", "gpt-4o");
 		if (!model) {
 			throw new Error("Expected github-copilot/gpt-4o model to exist");
 		}
 
-		const getApiKeySpy = vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue(undefined);
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${taskDepth}.db`));
+		authStorage.setRuntimeApiKey("github-copilot", "test-key");
 
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.appendMessage({
@@ -75,29 +101,41 @@ describe("AgentSession auto-compaction Copilot initiator override", () => {
 			timestamp: Date.now(),
 		});
 
-		const agent = new Agent({
-			initialState: {
-				model,
-				systemPrompt: "Test",
-				tools: [],
-				messages: [],
-			},
-		});
-
-		session = new AgentSession({
-			agent,
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			model,
 			sessionManager,
 			settings: Settings.isolated({
 				"compaction.autoContinue": false,
 			}),
-			modelRegistry,
-			forceCopilotAgentInitiator: true,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			taskDepth,
 		});
+		sessions.push(session);
+		return { model, session };
+	}
 
-		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
-		session.subscribe(event => {
+	function expectNoForcedCopilotHeader(model: { headers?: Record<string, string> | undefined }) {
+		expect(model.headers?.["X-Initiator"]).toBeUndefined();
+	}
+
+	async function triggerAutoCompaction(session: {
+		agent: { emitExternalEvent: (event: unknown) => void };
+		subscribe: (listener: (event: { type: string }) => void) => () => void;
+	}, model: { api: string; provider: string; id: string; contextWindow: number }) {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe(event => {
 			if (event.type === "auto_compaction_end") {
-				onCompactionDone();
+				unsubscribe();
+				resolve();
 			}
 		});
 
@@ -122,14 +160,62 @@ describe("AgentSession auto-compaction Copilot initiator override", () => {
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
 
-		await compactionDone;
-		await waitFor(() => getApiKeySpy.mock.calls.length > 0);
+		await promise;
+	}
 
-		const apiKeyCandidate = getApiKeySpy.mock.calls[0]?.[0] as Model | undefined;
-		expect(apiKeyCandidate).toMatchObject({
-			provider: "github-copilot",
-			id: model.id,
-			headers: expect.objectContaining({ "X-Initiator": "agent" }),
-		});
+	it("keeps main-session manual compaction user-attributed", async () => {
+		const { model, session } = await createSession(0);
+
+		await session.compact();
+
+		expect(compactMock).toHaveBeenCalledTimes(1);
+		const compactModel = compactMock.mock.calls[0]?.[1] as { provider: string; id: string; headers?: Record<string, string> };
+		const compactOptions = compactMock.mock.calls[0]?.[5] as { initiatorOverride?: string } | undefined;
+		expect(compactModel.provider).toBe("github-copilot");
+		expect(compactModel.id).toBe(model.id);
+		expectNoForcedCopilotHeader(compactModel);
+		expect(compactOptions?.initiatorOverride).toBeUndefined();
+	});
+
+	it("uses agent attribution for main-session auto-compaction", async () => {
+		const { model, session } = await createSession(0);
+
+		await triggerAutoCompaction(session, model);
+
+		expect(compactMock).toHaveBeenCalledTimes(1);
+		const compactModel = compactMock.mock.calls[0]?.[1] as { provider: string; id: string; headers?: Record<string, string> };
+		const compactOptions = compactMock.mock.calls[0]?.[5] as { initiatorOverride?: string } | undefined;
+		expect(compactModel.provider).toBe("github-copilot");
+		expect(compactModel.id).toBe(model.id);
+		expectNoForcedCopilotHeader(compactModel);
+		expect(compactOptions?.initiatorOverride).toBe("agent");
+	});
+
+	it("keeps subagent manual compaction user-attributed", async () => {
+		const { model, session } = await createSession(1);
+
+		await session.compact();
+
+		expect(compactMock).toHaveBeenCalledTimes(1);
+		const compactModel = compactMock.mock.calls[0]?.[1] as { provider: string; id: string; headers?: Record<string, string> };
+		const compactOptions = compactMock.mock.calls[0]?.[5] as { initiatorOverride?: string } | undefined;
+		expect(compactModel.provider).toBe("github-copilot");
+		expect(compactModel.id).toBe(model.id);
+		expectNoForcedCopilotHeader(compactModel);
+		expect(compactOptions?.initiatorOverride).toBeUndefined();
+	});
+
+	it("uses agent attribution for subagent auto-compaction", async () => {
+		const { model, session } = await createSession(1);
+
+		await triggerAutoCompaction(session, model);
+
+		expect(compactMock).toHaveBeenCalledTimes(1);
+		const compactModel = compactMock.mock.calls[0]?.[1] as { provider: string; id: string; headers?: Record<string, string> };
+		const compactOptions = compactMock.mock.calls[0]?.[5] as { initiatorOverride?: string } | undefined;
+		expect(compactModel.provider).toBe("github-copilot");
+		expect(compactModel.id).toBe(model.id);
+		expectNoForcedCopilotHeader(compactModel);
+		expect(compactOptions?.initiatorOverride).toBe("agent");
 	});
 });
