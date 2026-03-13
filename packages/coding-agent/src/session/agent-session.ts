@@ -3760,10 +3760,11 @@ export class AgentSession {
 
 		const addCandidate = (model: Model | undefined): void => {
 			if (!model) return;
-			const key = this.#getModelKey(model);
+			const candidate = this.#applySessionModelOverrides(model);
+			const key = this.#getModelKey(candidate);
 			if (seen.has(key)) return;
 			seen.add(key);
-			candidates.push(model);
+			candidates.push(candidate);
 		};
 
 		const currentModel = this.model;
