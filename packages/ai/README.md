@@ -990,6 +990,7 @@ Several providers support OAuth authentication (some also support static API key
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
+- **GitHub Copilot via OpenCode OAuth** (Copilot access using OpenCode's officially-supported OAuth, avoiding GitHub ToS concerns)
 - **Google Gemini CLI** (Gemini 2.0/2.5 via Google Cloud Code Assist; free tier or paid subscription)
 - **Antigravity** (Free Gemini 3, Claude, GPT-OSS via Google Cloud)
 - **Qwen Portal** (Qwen OAuth token or API key)
@@ -1061,6 +1062,7 @@ import {
 	loginAnthropic,
 	loginOpenAICodex,
 	loginGitHubCopilot,
+	loginGitHubCopilotViaOpenCode,
 	loginGeminiCli,
 	loginAntigravity,
 	loginCloudflareAiGateway,
@@ -1114,6 +1116,27 @@ const credentials = await loginGitHubCopilot({
 
 // Store credentials yourself
 const auth = { "github-copilot": { type: "oauth", ...credentials } };
+fs.writeFileSync("credentials.json", JSON.stringify(auth, null, 2));
+```
+
+**GitHub Copilot via OpenCode OAuth**: To use OpenCode's officially-supported OAuth for Copilot (avoiding potential GitHub ToS concerns):
+
+```typescript
+import { loginGitHubCopilotViaOpenCode } from "@oh-my-pi/pi-ai";
+
+const credentials = await loginGitHubCopilotViaOpenCode({
+	onAuth: ({ url, instructions }) => {
+		console.log(`Open: ${url}`);
+		if (instructions) console.log(instructions);
+	},
+	onPrompt: async (prompt) => {
+		return await getUserInput(prompt.message);
+	},
+	onProgress: (message) => console.log(message),
+});
+
+// Store credentials with provider ID "github-copilot-opencode"
+const auth = { "github-copilot-opencode": { type: "oauth", ...credentials } };
 fs.writeFileSync("credentials.json", JSON.stringify(auth, null, 2));
 ```
 

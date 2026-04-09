@@ -37,6 +37,7 @@ import { loginCerebras } from "./utils/oauth/cerebras";
 import { loginCloudflareAiGateway } from "./utils/oauth/cloudflare-ai-gateway";
 import { loginCursor } from "./utils/oauth/cursor";
 import { loginGitHubCopilot } from "./utils/oauth/github-copilot";
+import { loginGitHubCopilotViaOpenCode } from "./utils/oauth/opencode";
 import { loginGitLabDuo } from "./utils/oauth/gitlab-duo";
 import { loginAntigravity } from "./utils/oauth/google-antigravity";
 import { loginGeminiCli } from "./utils/oauth/google-gemini-cli";
@@ -765,6 +766,14 @@ export class AuthStorage {
 			}
 			case "github-copilot":
 				credentials = await loginGitHubCopilot({
+					onAuth: (url, instructions) => ctrl.onAuth({ url, instructions }),
+					onPrompt: ctrl.onPrompt,
+					onProgress: ctrl.onProgress,
+					signal: ctrl.signal,
+				});
+				break;
+			case "github-copilot-opencode":
+				credentials = await loginGitHubCopilotViaOpenCode({
 					onAuth: (url, instructions) => ctrl.onAuth({ url, instructions }),
 					onPrompt: ctrl.onPrompt,
 					onProgress: ctrl.onProgress,
