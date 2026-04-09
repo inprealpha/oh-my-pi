@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added OpenCode OAuth login option for GitHub Copilot so users can sign in with an OpenCode-issued token instead of the GitHub device flow
+
 ## [14.0.0] - 2026-04-08
 ### Breaking Changes
 

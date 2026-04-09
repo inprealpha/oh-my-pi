@@ -15,6 +15,17 @@ const COPILOT_HEADERS = {
 	"Copilot-Integration-Id": "vscode-chat",
 } as const;
 
+export type GitHubCopilotAuthMethod = "github" | "opencode";
+
+export type GitHubCopilotLoginOptions = {
+	onAuth: (url: string, instructions?: string) => void;
+	onPrompt: (prompt: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
+	onProgress?: (message: string) => void;
+	signal?: AbortSignal;
+	authMethod?: GitHubCopilotAuthMethod;
+	enterpriseDomain?: string;
+};
+
 const INITIAL_POLL_INTERVAL_MULTIPLIER = 1.2;
 const SLOW_DOWN_POLL_INTERVAL_MULTIPLIER = 1.4;
 type DeviceCodeResponse = {
@@ -37,6 +48,20 @@ type DeviceTokenErrorResponse = {
 	interval?: number;
 };
 
+function normalizeAuthMethod(input: string | undefined): GitHubCopilotAuthMethod | null {
+	if (!input) return null;
+	const normalized = input.trim().toLowerCase();
+	if (normalized === "opencode") return "opencode";
+	if (normalized === "github") return "github";
+	return null;
+}
+
+function ensureNotCancelled(signal?: AbortSignal): void {
+	if (signal?.aborted) {
+		throw new Error("Login cancelled");
+	}
+}
+
 export function normalizeDomain(input: string): string | null {
 	const trimmed = input.trim();
 	if (!trimmed) return null;
@@ -46,6 +71,48 @@ export function normalizeDomain(input: string): string | null {
 	} catch {
 		return null;
 	}
+}
+
+async function resolveAuthMethod(options: GitHubCopilotLoginOptions): Promise<GitHubCopilotAuthMethod> {
+	if (options.authMethod) return options.authMethod;
+
+	const methodInput = await options.onPrompt({
+		message: "Login method for Copilot (github/opencode)",
+		placeholder: "github",
+		allowEmpty: true,
+	});
+	ensureNotCancelled(options.signal);
+
+	const parsed = normalizeAuthMethod(methodInput);
+	return parsed ?? "github";
+}
+
+async function resolveEnterpriseDomain(
+	options: GitHubCopilotLoginOptions,
+	promptIfMissing = true,
+): Promise<string | null> {
+	if (options.enterpriseDomain !== undefined) {
+		const normalized = options.enterpriseDomain ? normalizeDomain(options.enterpriseDomain) : null;
+		if (options.enterpriseDomain && !normalized) {
+			throw new Error("Invalid GitHub Enterprise URL/domain");
+		}
+		return normalized;
+	}
+
+	if (!promptIfMissing) return null;
+
+	const input = await options.onPrompt({
+		message: "GitHub Enterprise URL/domain (blank for github.com)",
+		placeholder: "company.ghe.com",
+		allowEmpty: true,
+	});
+	ensureNotCancelled(options.signal);
+
+	const enterpriseDomain = normalizeDomain(input);
+	if (input.trim() && !enterpriseDomain) {
+		throw new Error("Invalid GitHub Enterprise URL/domain");
+	}
+	return enterpriseDomain;
 }
 
 function getUrls(domain: string): {
@@ -303,27 +370,30 @@ async function enableAllGitHubCopilotModels(
  * @param options.onProgress - Optional progress callback
  * @param options.signal - Optional AbortSignal for cancellation
  */
-export async function loginGitHubCopilot(options: {
-	onAuth: (url: string, instructions?: string) => void;
-	onPrompt: (prompt: { message: string; placeholder?: string; allowEmpty?: boolean }) => Promise<string>;
-	onProgress?: (message: string) => void;
-	signal?: AbortSignal;
-}): Promise<OAuthCredentials> {
-	const input = await options.onPrompt({
-		message: "GitHub Enterprise URL/domain (blank for github.com)",
-		placeholder: "company.ghe.com",
-		allowEmpty: true,
-	});
+export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Promise<OAuthCredentials> {
+	const authMethod = await resolveAuthMethod(options);
 
-	if (options.signal?.aborted) {
-		throw new Error("Login cancelled");
+	if (authMethod === "opencode") {
+		const tokenInput = await options.onPrompt({
+			message: "OpenCode OAuth token for Copilot (paste token from opencode auth)",
+			placeholder: "opencode oauth token",
+			allowEmpty: false,
+		});
+		ensureNotCancelled(options.signal);
+
+		const token = tokenInput.trim();
+		if (!token) {
+			throw new Error("OpenCode OAuth token is required");
+		}
+
+		const enterpriseDomain = await resolveEnterpriseDomain(options, false);
+		const credentials = await refreshGitHubCopilotToken(token, enterpriseDomain ?? undefined);
+		options.onProgress?.("Enabling models...");
+		await enableAllGitHubCopilotModels(credentials.access, enterpriseDomain ?? undefined);
+		return credentials;
 	}
 
-	const trimmed = input.trim();
-	const enterpriseDomain = normalizeDomain(input);
-	if (trimmed && !enterpriseDomain) {
-		throw new Error("Invalid GitHub Enterprise URL/domain");
-	}
+	const enterpriseDomain = await resolveEnterpriseDomain(options, true);
 	const domain = enterpriseDomain || "github.com";
 
 	const device = await startDeviceFlow(domain);
@@ -338,7 +408,6 @@ export async function loginGitHubCopilot(options: {
 	);
 	const credentials = await refreshGitHubCopilotToken(githubAccessToken, enterpriseDomain ?? undefined);
 
-	// Enable all models after successful login
 	options.onProgress?.("Enabling models...");
 	await enableAllGitHubCopilotModels(credentials.access, enterpriseDomain ?? undefined);
 	return credentials;

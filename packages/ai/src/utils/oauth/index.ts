@@ -57,12 +57,7 @@ export {
 	refreshCursorToken,
 } from "./cursor";
 // GitHub Copilot
-export {
-	getGitHubCopilotBaseUrl,
-	loginGitHubCopilot,
-	normalizeDomain,
-	refreshGitHubCopilotToken,
-} from "./github-copilot";
+export * from "./github-copilot";
 // GitLab Duo
 export { loginGitLabDuo, refreshGitLabDuoToken } from "./gitlab-duo";
 // Google Antigravity

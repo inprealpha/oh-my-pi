@@ -1110,6 +1110,7 @@ const credentials = await loginGitHubCopilot({
 		return await getUserInput(prompt.message);
 	},
 	onProgress: (message) => console.log(message),
+	authMethod: "opencode", // optional: use OpenCode OAuth token instead of GitHub device flow
 });
 
 // Store credentials yourself
