@@ -9,6 +9,7 @@ import { refreshAntigravityToken } from "./google-antigravity";
 import { refreshGoogleCloudToken } from "./google-gemini-cli";
 import { refreshKimiToken } from "./kimi";
 import { refreshOpenAICodexToken } from "./openai-codex";
+import { refreshGitHubCopilotViaOpenCodeToken } from "./opencode";
 import type {
 	OAuthCredentials,
 	OAuthProvider,
@@ -63,6 +64,8 @@ export {
 	normalizeDomain,
 	refreshGitHubCopilotToken,
 } from "./github-copilot";
+// GitHub Copilot via OpenCode OAuth
+export { loginGitHubCopilotViaOpenCode, refreshGitHubCopilotViaOpenCodeToken } from "./opencode";
 // GitLab Duo
 export { loginGitLabDuo, refreshGitLabDuoToken } from "./gitlab-duo";
 // Google Antigravity
@@ -168,6 +171,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 	{
 		id: "github-copilot",
 		name: "GitHub Copilot",
+		available: true,
+	},
+	{
+		id: "github-copilot-opencode",
+		name: "GitHub Copilot (via OpenCode OAuth)",
 		available: true,
 	},
 	{
@@ -358,6 +366,9 @@ export async function refreshOAuthToken(
 			break;
 		case "github-copilot":
 			newCredentials = await refreshGitHubCopilotToken(credentials.refresh, credentials.enterpriseUrl);
+			break;
+		case "github-copilot-opencode":
+			newCredentials = await refreshGitHubCopilotViaOpenCodeToken(credentials.refresh);
 			break;
 		case "google-gemini-cli":
 			if (!credentials.projectId) {
